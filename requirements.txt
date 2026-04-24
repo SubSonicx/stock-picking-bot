@@ -1,0 +1,10 @@
+yfinance
+groq
+python-dotenv
+requests
+schedule
+pandas
+numpy
+lxml
+mplfinance
+matplotlib
