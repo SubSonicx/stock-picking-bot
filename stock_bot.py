@@ -932,18 +932,20 @@ def run_screening(tickers: list[str], delay: float = 0.35) -> list[Stock]:
     """
     log.info(f"Phase 1: Batch price download for {len(tickers)} tickers …")
     tg_status(f"🔍 Scan started: {len(tickers)} stocks. Phase 1: technical screening …")
+    scan_start = datetime.now()
 
-    # ── Phase 1: Batch download in chunks of 200 ──────────────────────────
+    # ── Phase 1: Sequential chunks with delays to avoid DNS overload ──────
     tech_scores: dict[str, float] = {}
     price_data:  dict[str, pd.Series] = {}
-    chunk_size = 200
+    chunk_size = 50   # smaller chunks = less parallel connections
 
     for i in range(0, len(tickers), chunk_size):
         chunk = tickers[i:i + chunk_size]
         try:
             raw = yf.download(
                 chunk, period="1y", auto_adjust=True,
-                progress=False, threads=True, timeout=30
+                progress=False, threads=False,  # no parallel threads
+                timeout=20
             )
             if isinstance(raw.columns, pd.MultiIndex):
                 closes = raw["Close"]
@@ -954,8 +956,10 @@ def run_screening(tickers: list[str], delay: float = 0.35) -> list[Stock]:
                 try:
                     if ticker in closes.columns:
                         col = closes[ticker].dropna()
+                    elif len(chunk) == 1 and not closes.empty:
+                        col = closes.iloc[:, 0].dropna()
                     else:
-                        col = closes.dropna() if len(chunk) == 1 else pd.Series()
+                        continue
                     if len(col) >= 60:
                         sc = _tech_score_from_series(col)
                         tech_scores[ticker] = sc
@@ -963,8 +967,13 @@ def run_screening(tickers: list[str], delay: float = 0.35) -> list[Stock]:
                 except Exception:
                     pass
         except Exception as e:
-            log.debug(f"Batch chunk {i} error: {e}")
-        time.sleep(0.5)
+            log.debug(f"Batch chunk {i}: {e}")
+
+        # Pause between chunks – gives DNS resolver time to breathe
+        time.sleep(2)
+        if i % 200 == 0 and i > 0:
+            log.info(f"  Phase 1: {i}/{len(tickers)} processed, {len(tech_scores)} with data …")
+            time.sleep(5)  # longer pause every 200 tickers
 
     log.info(f"Phase 1 done: {len(tech_scores)} stocks with price data")
 
@@ -1009,6 +1018,16 @@ def run_screening(tickers: list[str], delay: float = 0.35) -> list[Stock]:
 
     results.sort(key=lambda x: x.total_score, reverse=True)
     log.info(f"Screening done: {len(results)} results from {len(tickers)} universe.")
+
+    # ── Scan completion notification ──────────────────────────────────────
+    duration = int((datetime.now() - scan_start).total_seconds() / 60)
+    tg_status(
+        f"✅ Scan completed in {duration} min\n"
+        f"📊 Universe: {len(tickers)} stocks\n"
+        f"🔍 Phase 1: {len(tech_scores)} with price data\n"
+        f"🧠 Phase 2: {len(results)} fully scored candidates\n"
+        f"⭐ Above threshold (≥6.0): {len([r for r in results if r.total_score >= 6.0])}"
+    )
     return results
 
 
