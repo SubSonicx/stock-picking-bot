@@ -1733,9 +1733,14 @@ def _cmd_lastsignals():
 import signal as _signal
 import atexit
 import traceback
+import platform
 
 _BOT_START_TIME: datetime | None = None
-_DAEMON_MODE = False   # only send stop msg when running as daemon
+_DAEMON_MODE = False
+_IS_RAILWAY = bool(os.environ.get("RAILWAY_ENVIRONMENT") or
+                   os.environ.get("RAILWAY_PROJECT_ID") or
+                   os.environ.get("RAILWAY_SERVICE_ID"))
+_SIGTERM_COUNT = 0  # Railway sends SIGTERM on deploy – ignore first one
 
 
 def _uptime() -> str:
@@ -1747,43 +1752,70 @@ def _uptime() -> str:
     return f"{h}h {m}min"
 
 
+def _environment() -> str:
+    if _IS_RAILWAY:
+        return "☁️ Railway Cloud"
+    return f"💻 Local ({platform.node()})"
+
+
 def _send_stop_notification(reason: str = "unknown"):
-    """Sends a stop alert to Telegram. Called on any exit."""
+    """Sends a stop alert to Telegram."""
     if not _DAEMON_MODE:
-        return  # don't spam on --test / --quick / --now
+        return
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    env = _environment()
     msg = (
         f"🔴 <b>STOCK BOT STOPPED</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🕐 Time: {now}\n"
         f"⏱ Uptime: {_uptime()}\n"
+        f"🌍 Environment: {env}\n"
         f"❓ Reason: {reason}\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"<i>Restart: bash ~/Desktop/Stock_picking/start.sh</i>"
     )
+    if _IS_RAILWAY:
+        msg += "<i>Railway will restart the bot automatically.</i>"
+    else:
+        msg += "<i>Restart: bash ~/Desktop/Stock_picking/start.sh</i>"
     tg_send(msg)
     log.info(f"Stop notification sent: {reason}")
 
 
 def _handle_sigterm(signum, frame):
-    """macOS shutdown / launchctl stop → SIGTERM"""
-    _send_stop_notification("System shutdown or manual stop (SIGTERM)")
-    sys.exit(0)
+    """
+    Railway sends SIGTERM on every new deploy (rolling restart).
+    We delay and check if this is just a deploy restart (in which case
+    Railway restarts us immediately) or a real stop.
+    """
+    global _SIGTERM_COUNT
+    _SIGTERM_COUNT += 1
+
+    if _IS_RAILWAY:
+        # On Railway: SIGTERM = new deploy rolling in. Just exit cleanly.
+        # Railway restarts the process automatically – no stop notification needed.
+        log.info("SIGTERM received on Railway – new deploy rolling in, restarting …")
+        sys.exit(0)
+    else:
+        _send_stop_notification("System shutdown or manual stop (SIGTERM)")
+        sys.exit(0)
 
 
 def _handle_sigint(signum, frame):
-    """Ctrl+C → SIGINT"""
+    """Ctrl+C"""
     _send_stop_notification("Manually stopped (Ctrl+C)")
     sys.exit(0)
 
 
 def _on_crash():
-    """Called by atexit – catches unexpected crashes."""
-    # Only fires on crash (non-zero exit), not on clean sys.exit(0)
+    """atexit handler – catches unexpected crashes."""
     exc = sys.exc_info()
     if exc[0] is not None and exc[0] not in (SystemExit, KeyboardInterrupt):
-        tb = "".join(traceback.format_exception(*exc))[:300]
-        _send_stop_notification(f"💥 Crash!\n<code>{tb}</code>")
+        tb = "".join(traceback.format_exception(*exc))[:400]
+        _send_stop_notification(
+            f"💥 Crash!\n<code>{tb}</code>\n\n"
+            f"<i>{'Railway will auto-restart.' if _IS_RAILWAY else 'Please restart manually.'}</i>"
+        )
+
 
 
 def main():
@@ -1842,8 +1874,10 @@ def main():
         log.info(f"  Scan scheduled: {h:02d}:05")
 
     tg_status(
-        f"✅ Bot started. Scans: {', '.join(f'{h:02d}:05' for h in SCAN_HOURS)}\n"
-        f"<i>You'll get a message if the bot stops for any reason.</i>"
+        f"✅ Bot started on {_environment()}\n"
+        f"🕐 {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+        f"📅 Scans: {', '.join(f'{h:02d}:05' for h in SCAN_HOURS)}\n"
+        f"<i>You'll get a message if the bot stops unexpectedly.</i>"
     )
     log.info("Scheduler running. Waiting for next scan …")
 
