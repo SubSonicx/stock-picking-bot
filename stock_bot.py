@@ -1,3 +1,4 @@
+Content is user-generated and unverified.
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════╗
@@ -1737,10 +1738,15 @@ import platform
 
 _BOT_START_TIME: datetime | None = None
 _DAEMON_MODE = False
-_IS_RAILWAY = bool(os.environ.get("RAILWAY_ENVIRONMENT") or
-                   os.environ.get("RAILWAY_PROJECT_ID") or
-                   os.environ.get("RAILWAY_SERVICE_ID"))
-_SIGTERM_COUNT = 0  # Railway sends SIGTERM on deploy – ignore first one
+
+# Railway detection – check multiple possible env vars
+_IS_RAILWAY = any(os.environ.get(k) for k in [
+    "RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID", "RAILWAY_SERVICE_ID",
+    "RAILWAY_STATIC_URL", "RAILWAY_GIT_COMMIT_SHA", "RAILWAY_DEPLOYMENT_ID",
+    "RAILWAY_PROJECT_NAME", "RAILWAY_SERVICE_NAME",
+])
+
+_SIGTERM_RECEIVED_AT: datetime | None = None
 
 
 def _uptime() -> str:
@@ -1784,16 +1790,16 @@ def _send_stop_notification(reason: str = "unknown"):
 def _handle_sigterm(signum, frame):
     """
     Railway sends SIGTERM on every new deploy (rolling restart).
-    We delay and check if this is just a deploy restart (in which case
-    Railway restarts us immediately) or a real stop.
+    Suppress notification if:
+    - Running on Railway (it auto-restarts anyway)
+    - Uptime < 60s (likely a deploy restart, not a real crash)
     """
-    global _SIGTERM_COUNT
-    _SIGTERM_COUNT += 1
+    uptime_secs = 0
+    if _BOT_START_TIME:
+        uptime_secs = (datetime.now() - _BOT_START_TIME).total_seconds()
 
-    if _IS_RAILWAY:
-        # On Railway: SIGTERM = new deploy rolling in. Just exit cleanly.
-        # Railway restarts the process automatically – no stop notification needed.
-        log.info("SIGTERM received on Railway – new deploy rolling in, restarting …")
+    if _IS_RAILWAY or uptime_secs < 60:
+        log.info(f"SIGTERM received (uptime {uptime_secs:.0f}s) – deploy restart, exiting cleanly …")
         sys.exit(0)
     else:
         _send_stop_notification("System shutdown or manual stop (SIGTERM)")
@@ -1830,6 +1836,11 @@ def main():
     log.info("╔══════════════════════════════════════╗")
     log.info("║      STOCK SIGNAL BOT – Start        ║")
     log.info("╚══════════════════════════════════════╝")
+    log.info(f"Environment: {_environment()} | Railway detected: {_IS_RAILWAY}")
+    # Log which Railway vars are present (for debugging)
+    railway_vars = [k for k in os.environ if "RAILWAY" in k]
+    if railway_vars:
+        log.info(f"Railway env vars found: {railway_vars}")
 
     # Config check
     missing = [k for k, v in {
